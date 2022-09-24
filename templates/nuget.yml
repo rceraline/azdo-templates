@@ -1,0 +1,118 @@
+parameters:
+  - name: buildConfiguration
+  - name: slnFile
+  - name: projectNames
+    type: object
+    default: []
+  - name: projectPaths
+    type: object
+    default: []
+  - name: nugetFeedName
+  - name: gitVersionConfigFilePath
+    default: ./GitVersion.yml
+  - name: isTestEnabled
+    type: boolean
+    default: true
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+    persistCredentials: true
+
+  - task: gitversion/setup@0
+    displayName: Install GitVersion
+    inputs:
+      versionSpec: "5.x"
+
+  - task: gitversion/execute@0
+    displayName: Determine Version
+    inputs:
+      useConfigFile: true
+      configFilePath: "${{ parameters.gitVersionConfigFilePath }}"
+
+  - script: |
+      echo $(GitVersion.NuGetVersion)
+    displayName: Display version
+
+  - task: DotNetCoreCLI@2
+    displayName: "dotnet restore from"
+    inputs:
+      command: restore
+      projects: "${{ parameters.slnFile }}"
+      feedsToUse: "select"
+      feedRestore: ${{ parameters.nugetFeedName }}
+      includeNuGetOrg: true
+
+  - task: DotNetCoreCLI@2
+    displayName: "dotnet build"
+    inputs:
+      projects: "${{ parameters.slnFile }}"
+      arguments: "--configuration ${{ parameters.buildConfiguration }} /p:Version=$(GitVersion.NuGetVersion)"
+      versioningScheme: byBuildNumber
+
+  - ${{ if parameters.isTestEnabled }}:
+      - task: DotNetCoreCLI@2
+        displayName: Test unit
+        inputs:
+          command: "test"
+          arguments: '--configuration ${{ parameters.buildConfiguration }} --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura'
+          publishTestResults: true
+          projects: "**/*Tests?(.Unit).csproj"
+
+      - task: reportgenerator@4
+        displayName: "Combine code coverage results"
+        continueOnError: true
+        inputs:
+          reports: "$(Agent.TempDirectory)/**/*.cobertura.xml"
+          targetdir: "$(Build.SourcesDirectory)/CoverageResults"
+
+      - task: PublishCodeCoverageResults@1
+        displayName: "Publish code coverage"
+        continueOnError: true
+        inputs:
+          codeCoverageTool: Cobertura
+          summaryFileLocation: "$(Build.SourcesDirectory)/CoverageResults/Cobertura.xml"
+
+  - ${{ each projectName in parameters.projectNames }}:
+      - task: DotNetCoreCLI@2
+        displayName: "dotnet pack ${{ projectName }}"
+        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+        inputs:
+          command: pack
+          configurationToPack: ${{ parameters.buildConfiguration }}
+          packagesToPack: "${{ projectName }}/${{ projectName }}.csproj"
+          nobuild: true
+          versioningScheme: byEnvVar
+          versionEnvVar: GitVersion.NuGetVersion
+
+  - ${{ each projectPath in parameters.projectPaths }}:
+      - task: DotNetCoreCLI@2
+        displayName: "dotnet pack ${{ projectPath }}"
+        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+        inputs:
+          command: pack
+          configurationToPack: ${{ parameters.buildConfiguration }}
+          packagesToPack: "${{ projectPath }}"
+          nobuild: true
+          versioningScheme: byEnvVar
+          versionEnvVar: GitVersion.NuGetVersion
+
+  - task: NuGetAuthenticate@0
+    displayName: "NuGet Authenticate"
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+  - task: NuGetCommand@2
+    displayName: "NuGet push"
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    inputs:
+      packagesToPush: "$(Build.ArtifactStagingDirectory)/**/*.nupkg"
+      command: push
+      feedsToUse: "select"
+      publishVstsFeed: ${{ parameters.nugetFeedName }}
+      allowPackageConflicts: false
+
+  - script: |
+      git tag v$(GitVersion.NuGetVersion)
+      git push --tags
+    displayName: Tag main branch
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
