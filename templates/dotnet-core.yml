@@ -1,0 +1,139 @@
+parameters:
+  - name: publishWorkingDirectory
+  - name: databaseProjectFile
+    default: ""
+  - name: jobName
+    default: BuildAndTest
+  - name: artifact
+    default: drop
+  - name: checkout
+    default: self
+  - name: vmImage
+    default: windows-latest
+  - name: isTestEnabled
+    type: boolean
+    default: true
+  - name: zipArtifactSeparatelyFromBuild
+    type: boolean
+    default: false
+  - name: publishWebProjects
+    type: boolean
+    default: false
+  - name: postBuildSteps
+    type: stepList
+    default: []
+  - name: sonarQube
+    type: object
+    default: null
+
+jobs:
+  - job: ${{ parameters.jobName }}
+
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+
+    variables:
+      codeCoverageDir: $(Build.SourcesDirectory)/CoverageResults
+      codeCoverageSonarQubeFile: $(codeCoverageDir)/sonarqube.xml
+      codeCoverageCoberturaFile: $(codeCoverageDir)/cobertura.xml
+      solution: "**/*.sln"
+      buildPlatform: "Any CPU"
+      buildConfiguration: "Release"
+      outputFolder: $(Build.SourcesDirectory)\output
+
+    steps:
+      - checkout: ${{ parameters.checkout }}
+
+      - ${{ if parameters.sonarQube }}:
+          - task: SonarQubePrepare@5
+            inputs:
+              SonarQube: "sonarqube"
+              scannerMode: "MSBuild"
+              projectKey: ${{ parameters.sonarQube.projectKey }}
+              projectName: ${{ parameters.sonarQube.projectName }}
+              extraProperties: |
+                sonar.coverageReportPaths=$(codeCoverageSonarQubeFile)
+
+      - task: DotNetCoreCLI@2
+        displayName: Nuget Restore
+        inputs:
+          command: "restore"
+          feedsToUse: "select"
+          vstsFeed: "ab9df73a-7c84-45b5-b5de-e64a1f2d3ac5"
+
+      - task: DotNetCoreCLI@2
+        displayName: Build & Publish
+        inputs:
+          command: "publish"
+          publishWebProjects: ${{ parameters.publishWebProjects }}
+          modifyOutputPath: false
+          workingDirectory: ${{ parameters.publishWorkingDirectory }}
+          ${{ if parameters.zipArtifactSeparatelyFromBuild }}:
+            arguments: --output $(outputFolder) -c $(buildConfiguration) --self-contained true -r win-x64
+            zipAfterPublish: false
+          ${{ else }}:
+            arguments: --output $(Build.ArtifactStagingDirectory) -c $(buildConfiguration) --self-contained true -r win-x64
+            zipAfterPublish: true
+
+      - ${{ if parameters.zipArtifactSeparatelyFromBuild }}:
+          - task: ArchiveFiles@2
+            displayName: Zip Artifact
+            inputs:
+              rootFolderOrFile: $(outputFolder)
+              includeRootFolder: false
+              archiveType: "zip"
+              archiveFile: "$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip"
+              replaceExistingArchive: true
+              verbose: # Op
+
+      - ${{ if ne(parameters.databaseProjectFile, '') }}:
+          - task: VSBuild@1
+            displayName: Database build
+            inputs:
+              solution: ${{ parameters.databaseProjectFile }}
+              msbuildArgs: /p:OutputPath=$(Build.ArtifactStagingDirectory)/database
+              configuration: $(buildConfiguration)
+
+      - ${{ if parameters.isTestEnabled }}:
+          - task: DotNetCoreCLI@2
+            displayName: Test
+            inputs:
+              command: "test"
+              projects: "**/*Tests?(.Unit).csproj"
+              arguments: '--configuration $(buildConfiguration) --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura'
+              publishTestResults: true
+
+          - task: reportgenerator@4
+            displayName: "Combine code coverage results"
+            continueOnError: true
+            inputs:
+              reports: "$(Agent.TempDirectory)/**/*.cobertura.xml"
+              targetdir: $(codeCoverageDir)
+
+          - task: PublishCodeCoverageResults@1
+            displayName: "Publish code coverage to Azure DevOps"
+            continueOnError: true
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: $(codeCoverageCoberturaFile)
+
+      - ${{ if parameters.sonarQube }}:
+          - task: reportgenerator@4
+            displayName: "Format SonarQube code coverage"
+            continueOnError: true
+            inputs:
+              reports: $(codeCoverageCoberturaFile)
+              targetdir: $(codeCoverageDir)
+              reporttypes: SonarQube
+
+          - task: SonarQubeAnalyze@5
+
+          - task: SonarQubePublish@5
+            inputs:
+              pollingTimeoutSec: "300"
+
+      - publish: $(Build.ArtifactStagingDirectory)
+        artifact: ${{ parameters.artifact }}
+
+      - ${{ each step in parameters.postBuildSteps }}:
+          - ${{ step }}
