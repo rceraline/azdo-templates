@@ -35,7 +35,7 @@ jobs:
     variables:
       codeCoverageDir: $(Build.SourcesDirectory)/CoverageResults
       codeCoverageSonarQubeFile: $(codeCoverageDir)/sonarqube.xml
-      codeCoverageCoberturaFile: $(codeCoverageDir)/cobertura.xml
+      codeCoverageCoberturaFile: $(codeCoverageDir)/Cobertura.xml
       solution: "**/*.sln"
       buildPlatform: "Any CPU"
       buildConfiguration: "Release"
